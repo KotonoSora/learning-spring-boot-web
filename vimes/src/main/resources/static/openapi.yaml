@@ -1,0 +1,1268 @@
+openapi: 3.1.0
+info:
+  title: VIMES Inventory - Goods Receipt Management API (Mẫu 01 - VT)
+  description: |
+    Tài liệu giao tiếp API chuẩn hóa Full CRUD và Vận hành cho phân hệ Quản lý Phiếu Nhập Kho.
+    
+    ### Căn Cứ Pháp Lý & Chuẩn Mực Kế Toán:
+    - **Thông tư 200/2014/TT-BTC**: Biểu mẫu số 01 - VT, quy tắc hạch toán Nợ/Có và quy trình ký duyệt 4 bên (Người lập, Người giao, Thủ kho, Kế toán trưởng).
+    - **Điều 24, Điều 25 Luật Kế toán 2015**: Tính toàn vẹn của sổ sách kế toán, lưu vết kiểm toán (Audit Trail) và nguyên tắc bất biến của chứng từ tài chính.
+    
+    ### Tiêu Chuẩn Kỹ Thuật & Vận Hành (Enterprise Production-Ready):
+    - **Kiến trúc:** Domain-Driven Design (DDD), Database Transactions (ACID), và Snapshot Pattern.
+    - **Khả năng quan sát (Observability):** Correlation ID (`X-Request-Id`), Prometheus Metrics (`/metrics`), Container Probes (`/healthz`, `/ready`).
+    - **Bảo mật & Phòng thủ (Defense-in-Depth):** Strict Schema Validation, Anti-DDoS Rate Limiting, Error Masking chống rò rỉ cấu trúc hệ thống.
+  version: 1.2.0
+  contact:
+    name: Solution Architecture & DevOps Team - VIMES
+    email: sa-team@vimes.vn
+
+servers:
+  - url: http://localhost:3000/api/v1
+    description: Môi trường Phát triển Cục bộ / Docker Compose
+  - url: https://api-inventory.vimes.vn/api/v1
+    description: Cổng API Gateway Production (TLS 1.3 + WAF)
+
+tags:
+  - name: Goods Receipts
+    description: Quản lý vòng đời chứng từ Phiếu Nhập Kho (Tạo, Danh sách, Chi tiết, Cập nhật, Hủy hoàn kho).
+  - name: Master Data
+    description: Danh mục dùng chung phục vụ tự động điền (Vật tư, Kho bãi, Đơn vị/Phòng ban).
+  - name: System & Observability
+    description: Các endpoint giám sát sức khỏe container, kiểm tra kết nối CSDL và cào chỉ số Prometheus.
+
+paths:
+  # =========================================================================
+  # 1. GOODS RECEIPTS COLLECTION ENDPOINTS
+  # =========================================================================
+  /goods-receipts:
+    post:
+      tags:
+        - Goods Receipts
+      summary: Lập mới phiếu nhập kho (C - Create)
+      description: |
+        Tạo mới chứng từ Phiếu Nhập Kho theo Mẫu 01 - VT.
+        - **Tính toán:** Tự động tính `Thành tiền (Cột 4) = actualQty * unitPrice` và `Tổng cộng = sum(Thành tiền)`.
+        - **ACID Transaction:** Ghi đồng thời Master Header, Detail Items, cập nhật số dư kho tức thời (`inventory_balances`) và ghi log kiểm toán (`security_audit_logs`).
+        - **Async Event:** Phát Domain Event `GOODS_RECEIPT_CREATED` sang hệ thống Audit/Analytics.
+      operationId: createGoodsReceipt
+      parameters:
+        - $ref: '#/components/parameters/XRequestIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateGoodsReceiptRequest'
+            example:
+              receiptNumber: "PNK-2026-0001"
+              receiptDate: "2026-08-18"
+              actualReceivedDate: "2026-08-18"
+              organizationId: "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+              warehouseId: "c9a646d3-9c61-4cd7-bf5b-9b4dc257850a"
+              receiptType: "PURCHASE"
+              description: "Nhập kho thép cuộn phục vụ dự án VIMES Tower theo hóa đơn số 99882"
+              delivererName: "Nguyễn Văn A"
+              docReference: "HĐ-99882"
+              docDate: "2026-08-17"
+              docOrigin: "Công ty Thép Việt Nhật"
+              debitAccount: "152"
+              creditAccount: "331"
+              totalAmountWords: "Một triệu bốn trăm bảy mươi bảy nghìn năm trăm đồng"
+              attachedDocCount: "1 hóa đơn GTGT gốc"
+              creatorName: "Lê Văn Lập"
+              storekeeperName: "Trần Văn Kho"
+              chiefAccountantName: "Phạm Thị Trưởng"
+              status: "CONFIRMED"
+              items:
+                - productId: "e7d2b8a0-1234-4567-89ab-cdef01234567"
+                  productNameSnapshot: "Thép cuộn Phi 6"
+                  unitSnapshot: "Kg"
+                  docQty: 100.0
+                  actualQty: 98.5
+                  unitPrice: 15000.0
+                  debitAccount: "152"
+                  creditAccount: "331"
+                  note: "Hao hụt 1.5kg do vận chuyển"
+      responses:
+        '201':
+          description: Ghi nhận chứng từ nhập kho thành công
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestIdResponseHeader'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateGoodsReceiptSuccessResponse'
+        '400':
+          $ref: '#/components/responses/400ValidationError'
+        '409':
+          description: Xung đột dữ liệu (Số phiếu nhập kho đã tồn tại)
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestIdResponseHeader'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                success: false
+                message: "Số phiếu PNK-2026-0001 đã tồn tại trên hệ thống."
+                requestId: "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"
+        '429':
+          $ref: '#/components/responses/429RateLimited'
+        '500':
+          $ref: '#/components/responses/500InternalError'
+
+    get:
+      tags:
+        - Goods Receipts
+      summary: Danh sách phiếu nhập kho (R - Read List)
+      description: Truy vấn danh sách chứng từ có hỗ trợ phân trang, tìm kiếm theo số phiếu/người giao và lọc theo ngày, kho, loại nhập, trạng thái.
+      operationId: getGoodsReceipts
+      parameters:
+        - $ref: '#/components/parameters/XRequestIdHeader'
+        - name: search
+          in: query
+          required: false
+          description: Tìm kiếm gần đúng theo Số phiếu hoặc Tên người giao
+          schema:
+            type: string
+          example: "PNK-2026"
+        - name: fromDate
+          in: query
+          required: false
+          description: Lọc ngày lập phiếu từ ngày (YYYY-MM-DD)
+          schema:
+            type: string
+            format: date
+          example: "2026-08-01"
+        - name: toDate
+          in: query
+          required: false
+          description: Lọc ngày lập phiếu đến ngày (YYYY-MM-DD)
+          schema:
+            type: string
+            format: date
+          example: "2026-08-31"
+        - name: warehouseId
+          in: query
+          required: false
+          description: Lọc theo mã kho nhập
+          schema:
+            type: string
+            format: uuid
+        - name: status
+          in: query
+          required: false
+          description: Lọc theo trạng thái vòng đời chứng từ
+          schema:
+            type: string
+            enum: [DRAFT, CONFIRMED, CANCELLED]
+        - name: page
+          in: query
+          required: false
+          description: Số thứ tự trang
+          schema:
+            type: integer
+            default: 1
+            minimum: 1
+        - name: limit
+          in: query
+          required: false
+          description: Số lượng bản ghi trên một trang
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+      responses:
+        '200':
+          description: Lấy danh sách phiếu nhập kho thành công
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestIdResponseHeader'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GoodsReceiptListResponse'
+        '429':
+          $ref: '#/components/responses/429RateLimited'
+        '500':
+          $ref: '#/components/responses/500InternalError'
+
+  # =========================================================================
+  # 2. GOODS RECEIPT INDIVIDUAL ITEM ENDPOINTS
+  # =========================================================================
+  /goods-receipts/{id}:
+    get:
+      tags:
+        - Goods Receipts
+      summary: Lấy chi tiết một phiếu nhập kho (R - Read Detail)
+      description: Trả về đầy đủ thông tin Master Header kèm toàn bộ mảng Detail Items con bằng 1 truy vấn JSON Aggregation duy nhất (chống lỗi N+1 Query).
+      operationId: getGoodsReceiptById
+      parameters:
+        - $ref: '#/components/parameters/XRequestIdHeader'
+        - name: id
+          in: path
+          required: true
+          description: Mã UUID duy nhất của phiếu nhập kho
+          schema:
+            type: string
+            format: uuid
+          example: "a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d"
+      responses:
+        '200':
+          description: Trả về chi tiết chứng từ thành công
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestIdResponseHeader'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GoodsReceiptDetailResponse'
+        '404':
+          $ref: '#/components/responses/404NotFound'
+        '500':
+          $ref: '#/components/responses/500InternalError'
+
+    put:
+      tags:
+        - Goods Receipts
+      summary: Cập nhật phiếu nhập kho (U - Update)
+      description: |
+        Cập nhật nội dung chứng từ phiếu nhập kho:
+        - **Phiếu DRAFT:** Cho phép chỉnh sửa toàn diện Master Header và các dòng chi tiết.
+        - **Phiếu CONFIRMED:** Thực thi Transaction bù trừ tồn kho (Trừ ngược số lượng cũ `old_actual_qty` và cộng dồn số lượng mới `new_actual_qty`).
+        - **Phiếu CANCELLED:** Từ chối chỉnh sửa (HTTP 422 Unprocessable Content).
+      operationId: updateGoodsReceipt
+      parameters:
+        - $ref: '#/components/parameters/XRequestIdHeader'
+        - name: id
+          in: path
+          required: true
+          description: Mã UUID của phiếu nhập kho cần cập nhật
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateGoodsReceiptRequest'
+      responses:
+        '200':
+          description: Cập nhật phiếu nhập kho và điều chỉnh tồn kho thành công
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestIdResponseHeader'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UpdateGoodsReceiptSuccessResponse'
+        '400':
+          $ref: '#/components/responses/400ValidationError'
+        '404':
+          $ref: '#/components/responses/404NotFound'
+        '422':
+          description: Không thể chỉnh sửa chứng từ đã ở trạng thái hủy (CANCELLED)
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestIdResponseHeader'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                success: false
+                message: "Không thể chỉnh sửa phiếu nhập đã ở trạng thái CANCELLED."
+                requestId: "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"
+        '500':
+          $ref: '#/components/responses/500InternalError'
+
+    delete:
+      tags:
+        - Goods Receipts
+      summary: Xóa hoặc Hủy chứng từ kế toán (D - Delete / Stock Reversal)
+      description: |
+        Xử lý hủy hoặc xóa chứng từ tuân thủ Luật Kế toán:
+        - **Phiếu DRAFT:** Thực hiện **Xóa cứng (Hard Delete)** bản ghi Header và cascade các dòng Items.
+        - **Phiếu CONFIRMED:** Thực hiện **Hủy chứng từ (Soft Delete / Stock Reversal)**, đổi `status = CANCELLED` và **trừ ngược tồn kho** trong `inventory_balances`.
+      operationId: deleteOrCancelGoodsReceipt
+      parameters:
+        - $ref: '#/components/parameters/XRequestIdHeader'
+        - name: id
+          in: path
+          required: true
+          description: Mã UUID của phiếu nhập kho cần xóa hoặc hủy
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Xóa hoặc Hủy chứng từ thành công
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestIdResponseHeader'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeleteGoodsReceiptSuccessResponse'
+        '404':
+          $ref: '#/components/responses/404NotFound'
+        '500':
+          $ref: '#/components/responses/500InternalError'
+
+  # =========================================================================
+  # 3. MASTER DATA ENDPOINTS
+  # =========================================================================
+  /master-data/products:
+    get:
+      tags:
+        - Master Data
+      summary: Danh mục vật tư / hàng hóa (Catalog)
+      description: Lấy danh sách sản phẩm phục vụ tự động điền (Autocomplete) trên giao diện nhập liệu.
+      operationId: getProducts
+      parameters:
+        - $ref: '#/components/parameters/XRequestIdHeader'
+        - name: search
+          in: query
+          required: false
+          description: Tìm kiếm theo mã số vật tư hoặc tên sản phẩm
+          schema:
+            type: string
+          example: "Thép"
+      responses:
+        '200':
+          description: Danh sách sản phẩm vật tư
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestIdResponseHeader'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProductListResponse'
+        '500':
+          $ref: '#/components/responses/500InternalError'
+
+  /master-data/warehouses:
+    get:
+      tags:
+        - Master Data
+      summary: Danh mục kho bãi
+      description: Lấy danh sách các kho tiếp nhận hàng hóa trực thuộc doanh nghiệp.
+      operationId: getWarehouses
+      parameters:
+        - $ref: '#/components/parameters/XRequestIdHeader'
+      responses:
+        '200':
+          description: Danh sách kho bãi
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestIdResponseHeader'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WarehouseListResponse'
+        '500':
+          $ref: '#/components/responses/500InternalError'
+
+  /master-data/organizations:
+    get:
+      tags:
+        - Master Data
+      summary: Danh mục đơn vị / phòng ban
+      description: Lấy danh sách các đơn vị chủ quản và bộ phận lập phiếu.
+      operationId: getOrganizations
+      parameters:
+        - $ref: '#/components/parameters/XRequestIdHeader'
+      responses:
+        '200':
+          description: Danh sách đơn vị và phòng ban
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestIdResponseHeader'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrganizationListResponse'
+        '500':
+          $ref: '#/components/responses/500InternalError'
+
+  # =========================================================================
+  # 4. SYSTEM & OBSERVABILITY ENDPOINTS
+  # =========================================================================
+  /healthz:
+    get:
+      tags:
+        - System & Observability
+      summary: Liveness Probe (Kiểm tra tiến trình sống)
+      description: Dùng cho Docker / Kubernetes Liveness Probe để xác nhận tiến trình Node.js/Express đang chạy.
+      operationId: checkLiveness
+      responses:
+        '200':
+          description: Dịch vụ đang hoạt động bình thường
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "UP"
+                  uptime:
+                    type: number
+                    description: Thời gian ứng dụng đã chạy (giây)
+                    example: 3600.45
+                  timestamp:
+                    type: string
+                    format: date-time
+                    example: "2026-08-18T08:30:00.000Z"
+
+  /ready:
+    get:
+      tags:
+        - System & Observability
+      summary: Readiness Probe (Kiểm tra kết nối CSDL & Pool)
+      description: Dùng cho Kubernetes Readiness Probe / Load Balancer để kiểm tra trạng thái kết nối PostgreSQL và độ bão hòa của Connection Pool trước khi điều hướng traffic.
+      operationId: checkReadiness
+      responses:
+        '200':
+          description: Cơ sở dữ liệu và Connection Pool sẵn sàng phục vụ
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "READY"
+                  checks:
+                    type: object
+                    properties:
+                      database:
+                        type: string
+                        example: "HEALTHY"
+                      poolTotal:
+                        type: integer
+                        example: 10
+                      poolIdle:
+                        type: integer
+                        example: 8
+                      poolWaiting:
+                        type: integer
+                        example: 0
+                  timestamp:
+                    type: string
+                    format: date-time
+                    example: "2026-08-18T08:30:00.000Z"
+        '503':
+          description: Cơ sở dữ liệu bị mất kết nối hoặc quá tải Connection Pool
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "UNHEALTHY"
+                  checks:
+                    type: object
+                    properties:
+                      database:
+                        type: string
+                        example: "DOWN"
+                      error:
+                        type: string
+                        example: "Connection terminated unexpectedly"
+                  timestamp:
+                    type: string
+                    format: date-time
+                    example: "2026-08-18T08:30:00.000Z"
+
+  /metrics:
+    get:
+      tags:
+        - System & Observability
+      summary: Prometheus Metrics Exporter
+      description: Endpoint cung cấp các chỉ số hệ thống (CPU, RAM, Event Loop Lag, HTTP Requests, DB Rollback Rate) theo chuẩn OpenMetrics/Prometheus.
+      operationId: getMetrics
+      responses:
+        '200':
+          description: Dữ liệu Metrics định dạng text thuần của Prometheus
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: |
+                  # HELP vimes_http_requests_total Tổng số lượng HTTP Requests
+                  # TYPE vimes_http_requests_total counter
+                  vimes_http_requests_total{method="POST",route="/api/v1/goods-receipts",status_code="201"} 142
+                  # HELP vimes_db_transaction_errors_total Tổng số giao dịch Database Transaction bị Rollback
+                  # TYPE vimes_db_transaction_errors_total counter
+                  vimes_db_transaction_errors_total{operation="CREATE_RECEIPT"} 0
+
+# =========================================================================
+# COMPONENTS DEFINITIONS
+# =========================================================================
+components:
+  parameters:
+    XRequestIdHeader:
+      name: X-Request-Id
+      in: header
+      required: false
+      description: Mã UUID duy nhất dùng để truy vết luồng giao dịch (Distributed Tracing).
+      schema:
+        type: string
+        format: uuid
+        example: "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"
+
+  headers:
+    XRequestIdResponseHeader:
+      description: Mã UUID truy vết được phản hồi từ server để hỗ trợ tra cứu log.
+      schema:
+        type: string
+        format: uuid
+        example: "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"
+
+  responses:
+    400ValidationError:
+      description: Dữ liệu đầu vào không hợp lệ (Zod Schema Validation Failure)
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/XRequestIdResponseHeader'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ValidationErrorResponse'
+          example:
+            success: false
+            message: "Lỗi xác thực dữ liệu đầu vào (Validation Error)"
+            requestId: "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"
+            errors:
+              - path: "items.0.actualQty"
+                message: "Số lượng thực nhập không được âm"
+              - path: "receiptNumber"
+                message: "Số phiếu nhập không được để trống"
+
+    404NotFound:
+      description: Không tìm thấy chứng từ hoặc tài nguyên
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/XRequestIdResponseHeader'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            success: false
+            message: "Không tìm thấy phiếu nhập kho với ID đã cung cấp."
+            requestId: "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"
+
+    429RateLimited:
+      description: Vượt quá giới hạn tần suất gửi yêu cầu (Rate Limit Exceeded)
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/XRequestIdResponseHeader'
+        Retry-After:
+          description: Số giây cần chờ trước khi thử lại
+          schema:
+            type: integer
+            example: 60
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            success: false
+            message: "Tần suất tạo phiếu quá nhanh. Vui lòng chờ trong giây lát."
+            requestId: "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"
+
+    500InternalError:
+      description: Lỗi máy chủ nội bộ hoặc Database Transaction Rollback (Đã che giấu Stack Trace)
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/XRequestIdResponseHeader'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            success: false
+            message: "Đã xảy ra lỗi trong quá trình xử lý chứng từ."
+            requestId: "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"
+
+  schemas:
+    # -------------------------------------------------------------
+    # SCHEMAS: ITEMS & DETAIL DTOs
+    # -------------------------------------------------------------
+    ReceiptItemInput:
+      type: object
+      required:
+        - productId
+        - productNameSnapshot
+        - unitSnapshot
+        - docQty
+        - actualQty
+        - unitPrice
+      additionalProperties: false
+      properties:
+        productId:
+          type: string
+          format: uuid
+          description: Khóa ngoại tham chiếu danh mục vật tư
+          example: "e7d2b8a0-1234-4567-89ab-cdef01234567"
+        productNameSnapshot:
+          type: string
+          minLength: 1
+          description: Cột B - Đóng băng Tên, quy cách, phẩm chất tại thời điểm nhập
+          example: "Thép cuộn Phi 6"
+        unitSnapshot:
+          type: string
+          minLength: 1
+          description: Cột D - Đóng băng Đơn vị tính tại thời điểm nhập
+          example: "Kg"
+        docQty:
+          type: number
+          minimum: 0
+          description: Cột 1 - Số lượng theo chứng từ gốc (Hóa đơn / Lệnh điều động)
+          example: 100.0
+        actualQty:
+          type: number
+          minimum: 0
+          description: Cột 2 - Số lượng thực tế nhập kho (Dùng để tính tiền và tăng tồn kho)
+          example: 98.5
+        unitPrice:
+          type: number
+          minimum: 0
+          description: Cột 3 - Đơn giá mua thực tế hoặc giá hạch toán
+          example: 15000.0
+        debitAccount:
+          type: string
+          nullable: true
+          description: Tài khoản ghi Nợ chi tiết dòng hàng
+          example: "152"
+        creditAccount:
+          type: string
+          nullable: true
+          description: Tài khoản ghi Có chi tiết dòng hàng
+          example: "331"
+        note:
+          type: string
+          nullable: true
+          description: Ghi chú tình trạng hàng hóa hoặc lý do hao hụt
+          example: "Hao hụt 1.5kg do vận chuyển"
+
+    # -------------------------------------------------------------
+    # SCHEMAS: REQUEST BODIES
+    # -------------------------------------------------------------
+    CreateGoodsReceiptRequest:
+      type: object
+      required:
+        - receiptNumber
+        - receiptDate
+        - organizationId
+        - warehouseId
+        - receiptType
+        - delivererName
+        - items
+      additionalProperties: false
+      properties:
+        receiptNumber:
+          type: string
+          minLength: 1
+          description: Số hiệu chứng từ phiếu nhập (duy nhất trên toàn hệ thống)
+          example: "PNK-2026-0001"
+        receiptDate:
+          type: string
+          format: date
+          description: Ngày lập phiếu (Bộ phận mua hàng hoặc sản xuất lập)
+          example: "2026-08-18"
+        actualReceivedDate:
+          type: string
+          format: date
+          nullable: true
+          description: Ngày thủ kho thực nhận và ghi vào thẻ kho
+          example: "2026-08-18"
+        organizationId:
+          type: string
+          format: uuid
+          description: Đơn vị / Chi nhánh chủ quản phát sinh nghiệp vụ
+          example: "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+        warehouseId:
+          type: string
+          format: uuid
+          description: Kho bãi tiếp nhận hàng hóa vật lý
+          example: "c9a646d3-9c61-4cd7-bf5b-9b4dc257850a"
+        receiptType:
+          type: string
+          enum:
+            - PURCHASE
+            - INTERNAL_PRODUCTION
+            - OUTSOURCED_PROCESSING
+            - CAPITAL_CONTRIBUTION
+            - INVENTORY_SURPLUS
+          default: PURCHASE
+          description: |
+            Phân loại nghiệp vụ theo Mục [2] TT 200:
+            * `PURCHASE`: Mua ngoài (Lập 2 liên)
+            * `INTERNAL_PRODUCTION`: Tự sản xuất (Lập 3 liên)
+            * `OUTSOURCED_PROCESSING`: Thuê ngoài gia công
+            * `CAPITAL_CONTRIBUTION`: Nhận góp vốn
+            * `INVENTORY_SURPLUS`: Thừa phát hiện trong kiểm kê
+          example: "PURCHASE"
+        description:
+          type: string
+          nullable: true
+          description: Tóm tắt nội dung nghiệp vụ kinh tế (Điều 24 Luật Kế toán)
+          example: "Nhập kho thép cuộn dự án VIMES Tower theo HĐ 99882"
+        delivererName:
+          type: string
+          minLength: 1
+          description: Họ và tên người giao hàng
+          example: "Nguyễn Văn A"
+        docReference:
+          type: string
+          nullable: true
+          description: Số chứng từ gốc kèm theo (Số hóa đơn GTGT hoặc lệnh nhập)
+          example: "HĐ-99882"
+        docDate:
+          type: string
+          format: date
+          nullable: true
+          description: Ngày phát hành chứng từ gốc
+          example: "2026-08-17"
+        docOrigin:
+          type: string
+          nullable: true
+          description: Tên đơn vị / Nhà cung cấp phát hành chứng từ gốc
+          example: "Công ty Thép Việt Nhật"
+        debitAccount:
+          type: string
+          nullable: true
+          description: Tài khoản Nợ tổng hợp của chứng từ (VD 152, 156)
+          example: "152"
+        creditAccount:
+          type: string
+          nullable: true
+          description: Tài khoản Có tổng hợp của chứng từ (VD 331, 111)
+          example: "331"
+        totalAmountWords:
+          type: string
+          nullable: true
+          description: Tổng số tiền viết bằng chữ
+          example: "Một triệu bốn trăm bảy mươi bảy nghìn năm trăm đồng"
+        attachedDocCount:
+          type: string
+          nullable: true
+          description: Số lượng chứng từ gốc kèm theo phiếu
+          example: "1 hóa đơn GTGT gốc"
+        creatorName:
+          type: string
+          nullable: true
+          description: Họ tên người lập phiếu
+          example: "Lê Văn Lập"
+        storekeeperName:
+          type: string
+          nullable: true
+          description: Họ tên thủ kho
+          example: "Trần Văn Kho"
+        chiefAccountantName:
+          type: string
+          nullable: true
+          description: Họ tên kế toán trưởng
+          example: "Phạm Thị Trưởng"
+        status:
+          type: string
+          enum: [DRAFT, CONFIRMED]
+          default: CONFIRMED
+          description: Trạng thái chứng từ (DRAFT = Nháp, CONFIRMED = Đã xác nhận & tăng kho)
+          example: "CONFIRMED"
+        items:
+          type: array
+          minItems: 1
+          description: Danh sách các mặt hàng thực nhập
+          items:
+            $ref: '#/components/schemas/ReceiptItemInput'
+
+    UpdateGoodsReceiptRequest:
+      type: object
+      required:
+        - organizationId
+        - warehouseId
+        - delivererName
+        - items
+      additionalProperties: false
+      properties:
+        receiptDate:
+          type: string
+          format: date
+          example: "2026-08-18"
+        actualReceivedDate:
+          type: string
+          format: date
+          nullable: true
+          example: "2026-08-18"
+        organizationId:
+          type: string
+          format: uuid
+        warehouseId:
+          type: string
+          format: uuid
+        receiptType:
+          type: string
+          enum: [PURCHASE, INTERNAL_PRODUCTION, OUTSOURCED_PROCESSING, CAPITAL_CONTRIBUTION, INVENTORY_SURPLUS]
+        description:
+          type: string
+          nullable: true
+        delivererName:
+          type: string
+          minLength: 1
+        docReference:
+          type: string
+          nullable: true
+        docDate:
+          type: string
+          format: date
+          nullable: true
+        docOrigin:
+          type: string
+          nullable: true
+        debitAccount:
+          type: string
+          nullable: true
+        creditAccount:
+          type: string
+          nullable: true
+        totalAmountWords:
+          type: string
+          nullable: true
+        attachedDocCount:
+          type: string
+          nullable: true
+        creatorName:
+          type: string
+          nullable: true
+        storekeeperName:
+          type: string
+          nullable: true
+        chiefAccountantName:
+          type: string
+          nullable: true
+        status:
+          type: string
+          enum: [DRAFT, CONFIRMED]
+        items:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/ReceiptItemInput'
+
+    # -------------------------------------------------------------
+    # SCHEMAS: SUCCESS RESPONSES
+    # -------------------------------------------------------------
+    CreateGoodsReceiptSuccessResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        message:
+          type: string
+          example: "Lập phiếu nhập kho thành công (Mẫu 01 - VT)"
+        requestId:
+          type: string
+          format: uuid
+          example: "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"
+        data:
+          type: object
+          properties:
+            receiptId:
+              type: string
+              format: uuid
+              example: "a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d"
+            totalAmount:
+              type: number
+              description: Tổng thành tiền Cột 4 tự động tính toán
+              example: 1477500.00
+
+    UpdateGoodsReceiptSuccessResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        message:
+          type: string
+          example: "Cập nhật phiếu nhập kho và điều chỉnh tồn kho thành công"
+        requestId:
+          type: string
+          format: uuid
+          example: "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"
+        data:
+          type: object
+          properties:
+            receiptId:
+              type: string
+              format: uuid
+              example: "a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d"
+            totalAmount:
+              type: number
+              example: 1977500.00
+
+    DeleteGoodsReceiptSuccessResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        message:
+          type: string
+          example: "Đã hủy chứng từ nhập kho và hoàn trả tồn kho thành công (Stock Reversal)"
+        requestId:
+          type: string
+          format: uuid
+          example: "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"
+        data:
+          type: object
+          properties:
+            receiptId:
+              type: string
+              format: uuid
+              example: "a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d"
+            action:
+              type: string
+              enum: [HARD_DELETED, CANCELLED_AND_REVERSED]
+              example: "CANCELLED_AND_REVERSED"
+
+    GoodsReceiptDetailResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        requestId:
+          type: string
+          format: uuid
+          example: "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"
+        data:
+          type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+              example: "a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d"
+            receiptNumber:
+              type: string
+              example: "PNK-2026-0001"
+            receiptDate:
+              type: string
+              format: date
+              example: "2026-08-18"
+            actualReceivedDate:
+              type: string
+              format: date
+              example: "2026-08-18"
+            receiptType:
+              type: string
+              example: "PURCHASE"
+            description:
+              type: string
+              example: "Nhập kho thép cuộn theo HĐ 99882"
+            organization:
+              type: object
+              properties:
+                id:
+                  type: string
+                  format: uuid
+                name:
+                  type: string
+                  example: "CÔNG TY CỔ PHẦN VIMES"
+                department:
+                  type: string
+                  example: "Kế toán - Quản lý Vật tư"
+            warehouse:
+              type: object
+              properties:
+                id:
+                  type: string
+                  format: uuid
+                name:
+                  type: string
+                  example: "Kho Tổng Hà Nội"
+                location:
+                  type: string
+                  example: "KCN Sài Đồng, Long Biên, Hà Nội"
+            delivererName:
+              type: string
+              example: "Nguyễn Văn A"
+            docReference:
+              type: string
+              example: "HĐ-99882"
+            docDate:
+              type: string
+              format: date
+              example: "2026-08-17"
+            docOrigin:
+              type: string
+              example: "Công ty Thép Việt Nhật"
+            debitAccount:
+              type: string
+              example: "152"
+            creditAccount:
+              type: string
+              example: "331"
+            totalAmount:
+              type: number
+              example: 1477500.00
+            totalAmountWords:
+              type: string
+              example: "Một triệu bốn trăm bảy mươi bảy nghìn năm trăm đồng"
+            attachedDocCount:
+              type: string
+              example: "1 hóa đơn GTGT gốc"
+            signatures:
+              type: object
+              properties:
+                creatorName:
+                  type: string
+                  example: "Lê Văn Lập"
+                storekeeperName:
+                  type: string
+                  example: "Trần Văn Kho"
+                chiefAccountantName:
+                  type: string
+                  example: "Phạm Thị Trưởng"
+            status:
+              type: string
+              example: "CONFIRMED"
+            items:
+              type: array
+              items:
+                type: object
+                properties:
+                  id:
+                    type: string
+                    format: uuid
+                  lineNo:
+                    type: integer
+                    example: 1
+                  productId:
+                    type: string
+                    format: uuid
+                  productCode:
+                    type: string
+                    example: "VT001"
+                  productName:
+                    type: string
+                    example: "Thép cuộn Phi 6"
+                  unit:
+                    type: string
+                    example: "Kg"
+                  docQty:
+                    type: number
+                    example: 100.0
+                  actualQty:
+                    type: number
+                    example: 98.5
+                  unitPrice:
+                    type: number
+                    example: 15000.0
+                  amount:
+                    type: number
+                    example: 1477500.0
+                  debitAccount:
+                    type: string
+                    example: "152"
+                  creditAccount:
+                    type: string
+                    example: "331"
+                  note:
+                    type: string
+                    example: "Hao hụt 1.5kg do vận chuyển"
+
+    GoodsReceiptListResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        requestId:
+          type: string
+          format: uuid
+          example: "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"
+        data:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+                format: uuid
+                example: "a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d"
+              receiptNumber:
+                type: string
+                example: "PNK-2026-0001"
+              receiptDate:
+                type: string
+                format: date
+                example: "2026-08-18"
+              warehouseName:
+                type: string
+                example: "Kho Tổng Hà Nội"
+              delivererName:
+                type: string
+                example: "Nguyễn Văn A"
+              totalAmount:
+                type: number
+                example: 1477500.00
+              status:
+                type: string
+                example: "CONFIRMED"
+        pagination:
+          type: object
+          properties:
+            page:
+              type: integer
+              example: 1
+            limit:
+              type: integer
+              example: 20
+            totalItems:
+              type: integer
+              example: 105
+            totalPages:
+              type: integer
+              example: 6
+
+    ProductListResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        requestId:
+          type: string
+          format: uuid
+          example: "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"
+        data:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+                format: uuid
+                example: "e7d2b8a0-1234-4567-89ab-cdef01234567"
+              code:
+                type: string
+                example: "VT001"
+              name:
+                type: string
+                example: "Thép cuộn Phi 6"
+              unit:
+                type: string
+                example: "Kg"
+              defaultPrice:
+                type: number
+                example: 15000.0
+
+    WarehouseListResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        requestId:
+          type: string
+          format: uuid
+          example: "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"
+        data:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+                format: uuid
+                example: "c9a646d3-9c61-4cd7-bf5b-9b4dc257850a"
+              code:
+                type: string
+                example: "KHO-TONG-HN"
+              name:
+                type: string
+                example: "Kho Tổng Hà Nội"
+              location:
+                type: string
+                example: "KCN Sài Đồng, Long Biên, Hà Nội"
+
+    OrganizationListResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        requestId:
+          type: string
+          format: uuid
+          example: "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"
+        data:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+                format: uuid
+                example: "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+              code:
+                type: string
+                example: "VIMES-HN"
+              name:
+                type: string
+                example: "CÔNG TY CỔ PHẦN VIMES"
+              department:
+                type: string
+                example: "Kế toán - Quản lý Vật tư"
+
+    # -------------------------------------------------------------
+    # SCHEMAS: ERROR RESPONSES
+    # -------------------------------------------------------------
+    ValidationErrorResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: false
+        message:
+          type: string
+          example: "Lỗi xác thực dữ liệu đầu vào (Validation Error)"
+        requestId:
+          type: string
+          format: uuid
+          example: "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"
+        errors:
+          type: array
+          items:
+            type: object
+            properties:
+              path:
+                type: string
+                example: "items.0.actualQty"
+              message:
+                type: string
+                example: "Số lượng thực nhập không được âm"
+
+    ErrorResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: false
+        message:
+          type: string
+          example: "Đã xảy ra lỗi trong quá trình xử lý chứng từ."
+        requestId:
+          type: string
+          format: uuid
+          example: "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"
